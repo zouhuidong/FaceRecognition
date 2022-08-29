@@ -8,7 +8,8 @@
 #pragma comment(lib, "comsuppw.lib")
 using namespace std;
 
-#define SIZE 32
+#define SIZE		32
+#define THRESHOLD	0.55
 
 // 二值图，0 或 1
 typedef int BinaryGraph[SIZE][SIZE];
@@ -104,15 +105,15 @@ IMAGE zoomImage(IMAGE* pImg, int newWidth, int newHeight = 0)
 
 // 是否为边缘点
 // b 灰度差阈值
-bool isEdgePoint(int x, int y, UINT b)
+bool isEdgePoint(int x, int y, UINT b, DWORD* pBuf, int w, int h)
 {
 	POINT t[4] = { {0,1}, {0,-1}, {1,0}, {-1,0} };
-	int r = RGBtoGRAY(getpixel(x, y)) & 0xff;
+	int r = pBuf[x + y * w] & 0xff;
 	for (int i = 0; i < 4; i++)
 	{
 		int nx = x + t[i].x, ny = y + t[i].y;
-		if (nx >= 0 && nx < getwidth() - 2 && ny >= 0 && ny < getheight() - 2
-			&& ((int)RGBtoGRAY(getpixel(nx, ny)) & 0xff) - r >(int)b)
+		if (nx >= 0 && nx < w - 2 && ny >= 0 && ny < h - 2
+			&& (pBuf[nx + ny * w] & 0xff) - r >(int)b)
 			return true;
 	}
 	return false;
@@ -130,7 +131,7 @@ void Binarize(IMAGE* img, UINT b = 20)
 	DWORD* pBuf = GetImageBuffer(&bin);
 	for (int i = 0; i < w; i++)
 		for (int j = 0; j < h; j++)
-			pBuf[i + j * w] = isEdgePoint(i, j, b);
+			pBuf[i + j * w] = isEdgePoint(i, j, b, GetImageBuffer(img), w, h);
 
 	SetWorkingImage(pOld);
 	*img = bin;
@@ -167,7 +168,7 @@ double CmpBin(BinaryGraph bin1, BinaryGraph bin2)
 					}
 					else
 					{
-						count -= 0.2;
+						count -= 1;
 					}
 				}
 
@@ -244,6 +245,103 @@ void getFiles(string path, vector<string>& files)
 	}
 }
 
+// 彩色图像转换为灰度图像
+void  ColorToGray(IMAGE* pimg)
+{
+	DWORD* p = GetImageBuffer(pimg);	// 获取显示缓冲区指针
+	COLORREF c;
+
+	// 逐个像素点读取计算
+	for (int i = pimg->getwidth() * pimg->getheight() - 1; i >= 0; i--)
+	{
+		c = BGR(p[i]);
+		c = (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114 + 500) / 1000;
+		p[i] = RGB(c, c, c);	// 由于是灰度值，无需再执行 BGR 转换
+	}
+}
+
+// 寻找人脸
+// binSrc	样本二值图数组的指针
+// src_num	样本数量
+// img		搜索图像
+vector<RECT> FindFace(BinaryGraph** binSrc, size_t src_num, IMAGE* img)
+{
+	// 人脸区域
+	vector<RECT> vecRct;
+
+	int img_w = img->getwidth();
+	int img_h = img->getheight();
+
+	// 搜索矩形边长
+	int begin_size = 20;
+	int max_size = img_w > img_h ? img_h : img_w;
+	int step = 10;		// 边长步进
+	int interval = 10;	// 搜索间隔
+
+	// 当前搜索进度
+	int x = 0, y = 0;
+	int n_size = begin_size;
+
+	for (int n_size = begin_size; n_size < max_size; n_size += step)
+	{
+		interval = n_size / 2;
+		for (int x = 0, exit_x = 0; x < img_w - 1 && !exit_x; x += interval)
+		{
+			// 越界回缩
+			if (x + n_size >= img_w)
+			{
+				x = img_w - n_size - 1;
+				exit_x = 1;
+			}
+
+			for (int y = 0, exit_y = 0; y < img_h - 1 && !exit_y; y += interval)
+			{
+				if (y + n_size >= img_h)
+				{
+					y = img_h - n_size - 1;
+					exit_y = 1;
+				}
+
+				putimage(0, 0, img);
+
+				IMAGE region;
+				getimage(&region, x, y, n_size, n_size);
+				region = zoomImage(&region, SIZE, SIZE);
+				Binarize(&region);		// 二值化
+
+				rectangle(x, y, x + n_size, y + n_size);
+
+				// 获取二值图
+				BinaryGraph* bin = GetBinaryGraph(&region);
+
+				// 和每张脸谱对比，得到最大相似度
+				double similarity = 0;
+				for (int i = 0; i < src_num; i++)
+				{
+					double s = CmpBin(*binSrc[i], *bin);
+					if (s > similarity)
+						similarity = s;
+				}
+
+				// 判断为人脸
+				if (similarity > THRESHOLD)
+				{
+					vecRct.push_back({ x,y,x + n_size,y + n_size });
+					printf("Found human\n");
+				}
+				else
+				{
+					printf("Not yet\n");
+				}
+
+				DeleteBinaryGraph(bin);
+			}
+		}
+	}
+
+	return vecRct;
+}
+
 int main()
 {
 	initgraph(640, 480, SHOWCONSOLE);
@@ -262,56 +360,43 @@ int main()
 	for (int i = 0; i < src_num; i++)
 	{
 		loadimage(&pSrcImg[i], src_wpath[i].c_str());
-		pSrcImg[i] = zoomImage(&pSrcImg[i], SIZE, SIZE);
+		ColorToGray(&pSrcImg[i]);							// 转灰度
+		pSrcImg[i] = zoomImage(&pSrcImg[i], SIZE, SIZE);	// 定大小
+		Binarize(&pSrcImg[i]);								// 二值化
 	}
 
-	// 读入待判断脸图像
+	// 用户输入图像
 	wchar_t lpszFace[512] = { 0 };
-	printf("face:");
+	printf("pic path: ");
 	wscanf_s(L"%ls", lpszFace, 512);
 	IMAGE imgFace;
 	loadimage(&imgFace, lpszFace);
-	imgFace = zoomImage(&imgFace, SIZE, SIZE);
+	ColorToGray(&imgFace);
 
 	SetWindowPos(GetHWnd(), HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
 
-	// 快速浏览载入的人脸，并将其二值化
-	for (int i = 0; i < src_num; i++)
-	{
-		PrintImage(pSrcImg[i]);
-		Sleep(100);
-		Binarize(&pSrcImg[i]);		// 二值化
-		PrintImage(Bin2Img(&pSrcImg[i]));
-		Sleep(100);
-	}
-
-	// 待检测人脸
-	PrintImage(imgFace);
-	Sleep(300);
-	Binarize(&imgFace);
-	PrintImage(Bin2Img(&imgFace));
-	Sleep(300);
-
-	// 将二值化图像都转为二值图数组
+	// 将样本二值化图像都转为二值图数组
 	BinaryGraph** binSrc = new BinaryGraph * [src_num];
 	for (int i = 0; i < src_num; i++)
 		binSrc[i] = GetBinaryGraph(&pSrcImg[i]);
-	BinaryGraph* binFace = GetBinaryGraph(&imgFace);
 
-	// 和每张脸谱对比，得到最大相似度
-	double similarity = 0;
-	for (int i = 0; i < src_num; i++)
-	{
-		double s = CmpBin(*binSrc[i], *binFace);
-		if (s > similarity)
-			similarity = s;
-	}
-	printf("%.2f %s\n", similarity, similarity > 0.55 ? "Human" : "Not human");
+	getmessage(EM_CHAR);
+	// 找脸
+	setlinestyle(PS_SOLID, 2);
+	setlinecolor(RED);
+	vector<RECT> vecRct = FindFace(binSrc, src_num, &imgFace);
+	putimage(0, 0, &imgFace);
+	for (auto& rct : vecRct)
+		rectangle(rct.left, rct.top, rct.right, rct.bottom);
+
+	printf("Done.\n");
+	printf("Count: %I64u\n", vecRct.size());
+
+	getmessage(EM_CHAR);
 
 	// 回收内存
 	for (int i = 0; i < src_num; i++)
 		DeleteBinaryGraph(binSrc[i]);
-	DeleteBinaryGraph(binFace);
 	delete[] pSrcImg;
 
 	closegraph();
