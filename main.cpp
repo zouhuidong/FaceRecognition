@@ -113,7 +113,7 @@ bool isEdgePoint(int x, int y, UINT b, DWORD* pBuf, int w, int h)
 	{
 		int nx = x + t[i].x, ny = y + t[i].y;
 		if (nx >= 0 && nx < w - 2 && ny >= 0 && ny < h - 2
-			&& (pBuf[nx + ny * w] & 0xff) - r >(int)b)
+			&& (int)(pBuf[nx + ny * w] & 0xff) - r >(int)b)
 			return true;
 	}
 	return false;
@@ -154,27 +154,49 @@ double CmpBin(BinaryGraph bin1, BinaryGraph bin2)
 	double similarity = 0;
 
 	// 稍微移动图像进行比较
-	POINT t[9] = { {0,0}, {0,1}, {0,-1}, {1,0}, {-1,0}, {1,1}, {-1,-1}, {-1,1}, {1,-1} };
-	for (int k = 0; k < 9; k++)
+	POINT neibor[4] = { {0,1}, {0,-1}, {1,0}, {-1,0} };
+	//POINT t[9] = { {0,0}, {0,1}, {0,-1}, {1,0}, {-1,0}, {1,1}, {-1,-1}, {-1,1}, {1,-1} };
+	POINT t[1] = { {0,0} };
+	for (int k = 0; k < 1; k++)
 	{
 		double count = 0;
 		for (int i = 0, ni = t[k].x; i >= 0 && i < SIZE; i++, ni++)
 			for (int j = 0, nj = t[k].y; j >= 0 && j < SIZE; j++, nj++)
 				if (ni >= 0 && ni < SIZE && nj >= 0 && nj < SIZE)
 				{
+					bool equal = false;
 					if (bin1[i][j] == bin2[ni][nj])
 					{
+						equal = true;
 						count += bin1[i][j] ? power_white : power_black;
 					}
 					else
 					{
-						count -= 1;
+						for (int m = 0; m < 4; m++)
+						{
+							int x = i + neibor[m].x;
+							int y = j + neibor[m].y;
+							if (x >= 0 && x < SIZE && y >= 0 && y < SIZE)
+								if (bin1[x][y] == bin2[ni][nj])
+								{
+									equal = true;
+									count += bin1[x][y] ? power_white : power_black;
+								}
+						}
+					}
+
+					if (!equal)
+					{
+						count -= 0.5;
 					}
 				}
 
 		double s = count / ((double)bin1_white * power_white + bin1_black * power_black);
 		if (s > similarity)
-			similarity = s;
+			if (s >= 1)
+				similarity = 0.99;
+			else
+				similarity = s;
 	}
 
 	return similarity;
@@ -205,10 +227,11 @@ IMAGE Bin2Img(IMAGE* p)
 	return img;
 }
 
-void PrintImage(IMAGE img)
+void PrintImage(IMAGE img, bool b_zoom = true)
 {
 	int zoom = 10;
-	ImageToSize(SIZE * zoom, SIZE * zoom, &img);
+	if (b_zoom)
+		ImageToSize(SIZE * zoom, SIZE * zoom, &img);
 	cleardevice();
 	putimage(0, 0, &img);
 }
@@ -264,7 +287,8 @@ void  ColorToGray(IMAGE* pimg)
 // binSrc	样本二值图数组的指针
 // src_num	样本数量
 // img		搜索图像
-vector<RECT> FindFace(BinaryGraph** binSrc, size_t src_num, IMAGE* img)
+// imgBin	用于展示的 bin 图像
+vector<RECT> FindFace(BinaryGraph** binSrc, size_t src_num, IMAGE* img, IMAGE* imgBin)
 {
 	// 人脸区域
 	vector<RECT> vecRct;
@@ -273,10 +297,10 @@ vector<RECT> FindFace(BinaryGraph** binSrc, size_t src_num, IMAGE* img)
 	int img_h = img->getheight();
 
 	// 搜索矩形边长
-	int begin_size = 20;
+	int begin_size = 30;
 	int max_size = img_w > img_h ? img_h : img_w;
 	int step = 10;		// 边长步进
-	int interval = 10;	// 搜索间隔
+	int interval;		// 搜索间隔
 
 	// 当前搜索进度
 	int x = 0, y = 0;
@@ -302,12 +326,18 @@ vector<RECT> FindFace(BinaryGraph** binSrc, size_t src_num, IMAGE* img)
 					exit_y = 1;
 				}
 
-				putimage(0, 0, img);
+				putimage(0, 0, imgBin);
 
 				IMAGE region;
+				SetWorkingImage(img);
 				getimage(&region, x, y, n_size, n_size);
-				region = zoomImage(&region, SIZE, SIZE);
-				Binarize(&region);		// 二值化
+				SetWorkingImage();
+
+				//region = zoomImage(&region, SIZE, SIZE);
+				ImageToSize(SIZE, SIZE, &region);
+
+
+				//Binarize(&region);		// 二值化
 
 				rectangle(x, y, x + n_size, y + n_size);
 
@@ -328,10 +358,6 @@ vector<RECT> FindFace(BinaryGraph** binSrc, size_t src_num, IMAGE* img)
 				{
 					vecRct.push_back({ x,y,x + n_size,y + n_size });
 					printf("Found human\n");
-				}
-				else
-				{
-					printf("Not yet\n");
 				}
 
 				DeleteBinaryGraph(bin);
@@ -355,15 +381,20 @@ int main()
 	for (auto& path : src_path)
 		src_wpath.push_back(stow(path));
 
+	// 处理所有样本
 	size_t src_num = src_wpath.size();
 	IMAGE* pSrcImg = new IMAGE[src_num];
+	BinaryGraph** binSrc = new BinaryGraph * [src_num];		// 将样本二值化图像都转为二值图数组
 	for (int i = 0; i < src_num; i++)
 	{
 		loadimage(&pSrcImg[i], src_wpath[i].c_str());
 		ColorToGray(&pSrcImg[i]);							// 转灰度
 		pSrcImg[i] = zoomImage(&pSrcImg[i], SIZE, SIZE);	// 定大小
 		Binarize(&pSrcImg[i]);								// 二值化
+		binSrc[i] = GetBinaryGraph(&pSrcImg[i]);			// 转换为二值图结构
 	}
+
+	//---------- 初始化完毕 -----------
 
 	// 用户输入图像
 	wchar_t lpszFace[512] = { 0 };
@@ -371,28 +402,31 @@ int main()
 	wscanf_s(L"%ls", lpszFace, 512);
 	IMAGE imgFace;
 	loadimage(&imgFace, lpszFace);
+	IMAGE imgFaceOrigin = imgFace;		// 备份原图像
 	ColorToGray(&imgFace);
+	Binarize(&imgFace);
 
 	SetWindowPos(GetHWnd(), HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
 
-	// 将样本二值化图像都转为二值图数组
-	BinaryGraph** binSrc = new BinaryGraph * [src_num];
-	for (int i = 0; i < src_num; i++)
-		binSrc[i] = GetBinaryGraph(&pSrcImg[i]);
-
 	getmessage(EM_CHAR);
+
+	IMAGE imgBin = Bin2Img(&imgFace);
+
 	// 找脸
 	setlinestyle(PS_SOLID, 2);
 	setlinecolor(RED);
-	vector<RECT> vecRct = FindFace(binSrc, src_num, &imgFace);
-	putimage(0, 0, &imgFace);
-	for (auto& rct : vecRct)
-		rectangle(rct.left, rct.top, rct.right, rct.bottom);
-
+	vector<RECT> vecRct = FindFace(binSrc, src_num, &imgFace, &imgBin);
 	printf("Done.\n");
 	printf("Count: %I64u\n", vecRct.size());
 
+	// 展示
+	putimage(0, 0, &imgFaceOrigin);
+	for (auto& rct : vecRct)
+		rectangle(rct.left, rct.top, rct.right, rct.bottom);
+
 	getmessage(EM_CHAR);
+
+
 
 	// 回收内存
 	for (int i = 0; i < src_num; i++)
